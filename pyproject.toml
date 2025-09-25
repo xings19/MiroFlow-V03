@@ -30,6 +30,8 @@ dependencies = [
     "requests>=2.32.4",
     "filetype>=1.2.0",
     "Pillow",
+    "editdistance",
+    "firecrawl-py"
 ]
 
 [build-system]

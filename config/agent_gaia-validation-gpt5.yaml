@@ -1,5 +1,5 @@
 defaults:
-  - benchmark: gaia-validation
+  - benchmark: gaia-test
   - override hydra/job_logging: none
   - _self_  # Allow defining variables at the top of this file
 
@@ -52,6 +52,7 @@ sub_agents:
       min_p: 0.0
       top_k: -1
       max_tokens: 128000
+      reasoning_effort: "medium"
       openrouter_api_key: "${oc.env:OPENAI_API_KEY,???}"
       openrouter_base_url: "${oc.env:OPENAI_BASE_URL,https://api.openai.com/v1}"
       openrouter_provider: ""

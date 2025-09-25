@@ -16,6 +16,7 @@ from .utils.smart_request import smart_request, request_to_json
 
 SERPER_API_KEY = os.environ.get("SERPER_API_KEY", "")
 JINA_API_KEY = os.environ.get("JINA_API_KEY", "")
+FIRECRAWL_API_KEY = os.environ.get("FIRECRAWL_API_KEY", "")
 
 # Google search result filtering environment variables
 REMOVE_SNIPPETS = os.environ.get("REMOVE_SNIPPETS", "").lower() in ("true", "1", "yes")
@@ -345,7 +346,7 @@ async def search_wiki_revision(
         content = await smart_request(
             url=base_url,
             params=params,
-            env={"SERPER_API_KEY": SERPER_API_KEY, "JINA_API_KEY": JINA_API_KEY},
+            env={"SERPER_API_KEY": SERPER_API_KEY, "JINA_API_KEY": JINA_API_KEY, "FIRECRAWL_API_KEY": FIRECRAWL_API_KEY},
         )
         data = request_to_json(content)
 
@@ -524,6 +525,7 @@ async def search_archived_webpage(url: str, year: int, month: int, day: int) -> 
                     env={
                         "SERPER_API_KEY": SERPER_API_KEY,
                         "JINA_API_KEY": JINA_API_KEY,
+                        "FIRECRAWL_API_KEY": FIRECRAWL_API_KEY,
                     },
                 )
                 data = request_to_json(content)
@@ -582,7 +584,7 @@ async def search_archived_webpage(url: str, year: int, month: int, day: int) -> 
             content = await smart_request(
                 url=base_url,
                 params={"url": url},
-                env={"SERPER_API_KEY": SERPER_API_KEY, "JINA_API_KEY": JINA_API_KEY},
+                env={"SERPER_API_KEY": SERPER_API_KEY, "JINA_API_KEY": JINA_API_KEY, "FIRECRAWL_API_KEY": FIRECRAWL_API_KEY},
             )
             data = request_to_json(content)
             if "archived_snapshots" in data and "closest" in data["archived_snapshots"]:
@@ -661,7 +663,7 @@ async def scrape_website(url: str) -> str:
     """
     # TODO: Long Content Handling
     return await smart_request(
-        url, env={"SERPER_API_KEY": SERPER_API_KEY, "JINA_API_KEY": JINA_API_KEY}
+        url, env={"SERPER_API_KEY": SERPER_API_KEY, "JINA_API_KEY": JINA_API_KEY, "FIRECRAWL_API_KEY": FIRECRAWL_API_KEY}
     )
 
 

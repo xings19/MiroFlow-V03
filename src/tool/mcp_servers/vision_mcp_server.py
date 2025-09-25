@@ -10,8 +10,11 @@ from openai import OpenAI
 from fastmcp import FastMCP
 from google import genai
 from google.genai import types
+from google.genai.types import Tool, GenerateContentConfig
 import requests
 import asyncio
+import editdistance
+from urllib.parse import urlparse, unquote
 
 # Anthropic credentials
 ENABLE_CLAUDE_VISION = os.environ.get("ENABLE_CLAUDE_VISION", "false").lower() == "true"
@@ -33,6 +36,23 @@ GEMINI_MODEL_NAME = os.environ.get("GEMINI_MODEL_NAME", "gemini-2.5-pro")
 # Initialize FastMCP server
 mcp = FastMCP("vision-mcp-server")
 
+def get_most_similar_file(file_name, target_root):
+    if not os.path.exists(target_root):
+        return None
+    if not os.path.isdir(target_root):
+        return None
+
+    min_distance = 10000
+    min_distance_file = None
+    for file in os.listdir(target_root):
+        if os.path.isfile(os.path.join(target_root, file)):
+            if os.path.splitext(file)[1] != os.path.splitext(file_name)[1]:
+                continue
+            distance = editdistance.eval(file_name, file)
+            if distance < min_distance:
+                min_distance = distance
+                min_distance_file = file
+    return min_distance_file
 
 async def detect_image_format(file_path: str) -> str:
     try:
@@ -68,6 +88,41 @@ async def guess_mime_media_type_from_extension(file_path: str) -> str:
         return "image/jpeg"  # Default to JPEG if unknown
 
 
+async def preprocess_image(image_path_or_url):
+    try:
+        parsed = urlparse(image_path_or_url)
+        if parsed.scheme == "file":
+            image_path_or_url = unquote(parsed.path)
+        
+        if os.path.exists(image_path_or_url):
+            with open(image_path_or_url, "rb") as image_file:
+                image = base64.b64encode(image_file.read()).decode("utf-8")
+                mime_type = await detect_image_format(
+                    image_path_or_url
+                )
+                return image, mime_type
+        elif image_path_or_url.startswith("logs/") and 'tmpfiles' in image_path_or_url:
+            most_similar_file = get_most_similar_file(os.path.basename(image_path_or_url), os.path.dirname(image_path_or_url))
+            if most_similar_file:
+                with open(os.path.join(os.path.dirname(image_path_or_url), most_similar_file), "rb") as image_file:
+                    image = base64.b64encode(image_file.read()).decode("utf-8")
+                    mime_type = await detect_image_format(
+                        os.path.join(os.path.dirname(image_path_or_url), most_similar_file)
+                    )
+                    return image, mime_type
+        elif "home/user" in image_path_or_url:
+            return image_path_or_url, "sandbox"
+        else:
+            url = image_path_or_url
+            if url.startswith("http://"):
+                url = url.replace("http://", "https://", 1)
+            elif not url.startswith("https://"):
+                url = "https://" + url
+            return url, "url"
+    except Exception as e:
+        return image_path_or_url, "url"
+
+
 async def call_claude_vision(image_path_or_url: str, question: str) -> str:
     """Call Claude vision API."""
     messages_for_llm = [
@@ -87,29 +142,17 @@ async def call_claude_vision(image_path_or_url: str, question: str) -> str:
     ]
 
     try:
-        from urllib.parse import urlparse, unquote
-        parsed = urlparse(image_path_or_url)
-        if parsed.scheme == "file":
-            image_path_or_url = unquote(parsed.path)
-        if os.path.exists(image_path_or_url):  # Check if the file exists locally
-            with open(image_path_or_url, "rb") as image_file:
-                image_data = base64.b64encode(image_file.read()).decode("utf-8")
-                messages_for_llm[0]["content"][0]["source"] = dict(
-                    type="base64",
-                    media_type=await detect_image_format(image_path_or_url),
-                    data=image_data,
-                )
-        elif "home/user" in image_path_or_url:
+        image, mime_type = await preprocess_image(image_path_or_url)
+        if mime_type == "sandbox":
             return "The visual_question_answering tool cannot access to sandbox file, please use the local path provided by original instruction"
-        else:  # Otherwise, assume it's a URL
-            # Convert to https URL for Claude vision API
-            url = image_path_or_url
-            if url.startswith("http://"):
-                url = url.replace("http://", "https://", 1)
-            elif not url.startswith("https://"):
-                url = "https://" + url
-
-            messages_for_llm[0]["content"][0]["source"] = dict(type="url", url=url)
+        elif mime_type == "url":
+            messages_for_llm[0]["content"][0]["source"] = dict(type="url", url=image)
+        else:
+            messages_for_llm[0]["content"][0]["source"] = dict(
+                type="base64",
+                media_type=mime_type,
+                data=image,
+            )
 
         max_retries = 4
         for attempt in range(1, max_retries + 1):
@@ -145,20 +188,18 @@ async def call_claude_vision(image_path_or_url: str, question: str) -> str:
 async def call_openai_vision(image_path_or_url: str, question: str) -> str:
     """Call OpenAI vision API."""
     try:
-        if os.path.exists(image_path_or_url):  # Check if the file exists locally
-            with open(image_path_or_url, "rb") as image_file:
-                image_data = base64.b64encode(image_file.read()).decode("utf-8")
-                mime_type = await detect_image_format(image_path_or_url)
-                image_content = {
-                    "type": "image_url",
-                    "image_url": {"url": f"data:{mime_type};base64,{image_data}"},
-                }
-        elif "home/user" in image_path_or_url:
+        image, mime_type = await preprocess_image(image_path_or_url)
+        if mime_type == "sandbox":
             return "The visual_question_answering tool cannot access to sandbox file, please use the local path provided by original instruction"
-        else:  # Otherwise, assume it's a URL
+        elif mime_type == "url":
             image_content = {
                 "type": "image_url",
-                "image_url": {"url": image_path_or_url},
+                "image_url": {"url": image},
+            }
+        else:
+            image_content = {
+                "type": "image_url",
+                "image_url": {"url": f"data:{mime_type};base64,{image}"},
             }
 
         messages_for_llm = [
@@ -194,17 +235,10 @@ async def call_openai_vision(image_path_or_url: str, question: str) -> str:
 async def call_gemini_vision(image_path_or_url: str, question: str) -> str:
     """Call Gemini vision API."""
     try:
-        mime_type = await detect_image_format(image_path_or_url)
-        if os.path.exists(image_path_or_url):  # Check if the file exists locally
-            with open(image_path_or_url, "rb") as image_file:
-                image_data = image_file.read()
-                image = types.Part.from_bytes(
-                    data=image_data,
-                    mime_type=mime_type,
-                )
-        elif "home/user" in image_path_or_url:
+        image, mime_type = await preprocess_image(image_path_or_url)
+        if mime_type == "sandbox":
             return "The visual_question_answering tool cannot access to sandbox file, please use the local path provided by original instruction"
-        else:
+        elif mime_type == "url":
             headers = {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
             }
@@ -212,7 +246,7 @@ async def call_gemini_vision(image_path_or_url: str, question: str) -> str:
             max_attempts = 4
             for attempt in range(max_attempts):
                 try:
-                    response = requests.get(image_path_or_url, headers=headers)
+                    response = requests.get(image, headers=headers)
                     response.raise_for_status()  # Raise an exception for bad status codes
                     image_data = response.content
                     break
@@ -225,6 +259,11 @@ async def call_gemini_vision(image_path_or_url: str, question: str) -> str:
 
             image = types.Part.from_bytes(
                 data=image_data,
+                mime_type=mime_type,
+            )
+        else:
+            image = types.Part.from_bytes(
+                data=image,
                 mime_type=mime_type,
             )
     except Exception as e:
@@ -290,7 +329,21 @@ async def visual_question_answering(image_path_or_url: str, question: str) -> st
     Returns:
         The concatenated answers from Gemini vision model, including both VQA responses and OCR results.
     """
-
+    if image_path_or_url.startswith(("http://", "https://")):
+        # RFC protocol
+        try:
+            resp = requests.head(image_path_or_url, allow_redirects=True)
+            if resp.status_code >= 400 or "Content-Type" not in resp.headers:
+                resp = requests.get(image_path_or_url, stream=True, timeout=10)
+            content_type = resp.headers.get("Content-Type", "").lower()
+            if not content_type.startswith("image/"):
+                web_page_result = await web_page_question_answering(question, image_path_or_url)
+                if "[ERROR]" in web_page_result:
+                    return f"[ERROR]: Failed to call visual_question_answering: {web_page_result}."
+                else:
+                    return web_page_result + "\n\nHint: This is not an image file, the result is the answer to the question based on the web page."
+        except Exception as e:
+            pass
     ocr_prompt = """You are a meticulous text extraction specialist. Your task is to carefully scan the entire image and extract ALL visible text with maximum accuracy.
 
 IMPORTANT INSTRUCTIONS:
@@ -300,20 +353,30 @@ IMPORTANT INSTRUCTIONS:
 4. **Include numbers and symbols** - Extract all numerical values, symbols, and special characters
 5. **Double-check your work** - Review the entire image again to ensure nothing was missed
 6. **Describe any unclear, partially visible, or ambiguous text** - If any text is blurry, cut off, partly obscured, or otherwise difficult to read, **describe it as best as possible, even if you are unsure or cannot fully recognize it**.
+7. **If there is no text in the image, respond with 'NO TEXT FOUND'** - Do not make any guesses or assumptions about the text that may exist in the image.
+8. **If you can't view the image directly, don't make any guesses about the text that may exist in the image.**
 
 Remember: Your extraction will be used by someone who cannot see the image themselves. Any possible guess, uncertainty, or ambiguity should be reported in words rather than left out, so that nothing is omitted or lost.
 
 Return only the extracted text content, maintaining the original formatting and structure as much as possible. If there is no text in the image, respond with 'No text found'. If there are areas where text may exist but is unreadable or ambiguous, describe these as well."""
 
-    if ANTHROPIC_API_KEY:
-        ocr_result = await call_claude_vision(image_path_or_url, ocr_prompt)
-    elif OPENAI_API_KEY:
-        ocr_result = await call_openai_vision(image_path_or_url, ocr_prompt)
-    elif GEMINI_API_KEY:
-        ocr_result = await call_gemini_vision(image_path_or_url, ocr_prompt)
+    claude_ocr_result = await call_claude_vision(image_path_or_url, ocr_prompt)
+    if "[ERROR]" in claude_ocr_result:
+        gemini_ocr_result = await call_gemini_vision(image_path_or_url, ocr_prompt)
+        if "[ERROR]" in gemini_ocr_result:
+            openai_ocr_result = await call_openai_vision(image_path_or_url, ocr_prompt)
+            if "[ERROR]" in openai_ocr_result:
+                return f"[ERROR]: Failed to call visual_question_answering: {claude_ocr_result}\n{gemini_ocr_result}\n{openai_ocr_result}"
+            else:
+                ocr_result = openai_ocr_result
+        else:
+            ocr_result = gemini_ocr_result
     else:
-        return "[ERROR]: No API key is set, visual_question_answering tool is not available."
+        ocr_result = claude_ocr_result
 
+    if "no text found" in ocr_result.lower():
+        ocr_result = "No text found."
+        
     vqa_prompt = f"""You are a highly attentive visual analysis assistant. Your task is to carefully examine the image and provide a thorough, accurate answer to the question.
 
 IMPORTANT INSTRUCTIONS:
@@ -324,6 +387,7 @@ IMPORTANT INSTRUCTIONS:
 5. **Double-check your observations** - Verify your initial impressions by looking again at specific areas, especially for complex and multi-object recognition questions
 6. **Be precise and detailed** - Provide specific details rather than general observations
 7. **Report all visible or possible content, even if uncertain or ambiguous** - If you notice anything that is blurry, partly obscured, difficult to recognize, or of uncertain importance, **describe it in words instead of omitting it**. Do not leave out any possible content, even if you are unsure.
+8. **If you can't view the image directly, don't make any guesses about the image.**
 
 Remember: Your analysis will be used by someone who cannot see the image themselves. Any possible guess, uncertainty, or ambiguity should be reported in words rather than left out, so that nothing is omitted or lost.
 
@@ -336,16 +400,21 @@ Please provide a comprehensive analysis that demonstrates careful observation an
 """
     # Before answering, carefully analyze both the question and the image. Identify and briefly list potential subtle or easily overlooked VQA pitfalls or ambiguities that could arise in interpreting this question or image (e.g., confusing similar objects, missing small details, misreading text, ambiguous context, etc.). For each, suggest a method or strategy to avoid or mitigate these issues. Only after this analysis, proceed to answer the question, providing a thorough and detailed observation and reasoning process.
 
-    if ANTHROPIC_API_KEY:
-        vqa_result = await call_claude_vision(image_path_or_url, vqa_prompt)
-    elif OPENAI_API_KEY:
-        vqa_result = await call_openai_vision(image_path_or_url, vqa_prompt)
-    elif GEMINI_API_KEY:
-        vqa_result = await call_gemini_vision(image_path_or_url, vqa_prompt)
+    claude_vqa_result = await call_claude_vision(image_path_or_url, vqa_prompt)
+    if "[ERROR]" in claude_vqa_result:
+        gemini_vqa_result = await call_gemini_vision(image_path_or_url, vqa_prompt)
+        if "[ERROR]" in gemini_vqa_result:
+            openai_vqa_result = await call_openai_vision(image_path_or_url, vqa_prompt)
+            if "[ERROR]" in openai_vqa_result:
+                return f"[ERROR]: Failed to call visual_question_answering: {claude_vqa_result}"
+            else:
+                vqa_result = openai_vqa_result
+        else:
+            vqa_result = gemini_vqa_result
     else:
-        return "[ERROR]: No API key is set, visual_question_answering tool is not available."
+        vqa_result = claude_vqa_result
 
-    return f"OCR results:\n{ocr_result}\n\nVQA result:\n{vqa_result}"
+    return f"OCR results:\n{ocr_result}\n\nVQA results:\n{vqa_result}"
 
 
 # The tool visual_audio_youtube_analyzing only support single YouTube URL as input for now, though GEMINI can support multiple URLs up to 10 per request.
@@ -509,6 +578,40 @@ async def visual_audio_youtube_analyzing(
     hint = "\n\nHint: Large videos may trigger rate limits causing failures. If you need more website information rather than video visual content itself (such as video subtitles, titles, descriptions, key moments), you can also call tool `scrape_website` tool."
     return transcribe_content + answer_content + hint
 
+
+async def web_page_question_answering(question: str, url: str) -> str:
+    """Based on the given webpage (without scraping or downloading), answer a task-related question.
+
+    Args:
+        question: The question to answer. Try to keep the questions relevant to the task you are solving.
+        url: The full URL of the web page, publicly accessible. Note that it must be a URL on the Internet, not a local file, the url must startswith 'http://' or 'https://'
+
+    Returns:
+        The answer to the question.
+    """
+    if url.startswith("http://"):
+        url = url.replace("http://", "https://", 1)
+    elif not url.startswith("https://"):
+        url = "https://" + url
+
+    client = genai.Client(api_key=GEMINI_API_KEY)
+    model_id = "gemini-2.5-pro"
+    tools = [
+        {"url_context": {}},
+    ]
+
+    input_prompt = f"Based on {url}, answer the following question: {question}"
+    try:
+        response = client.models.generate_content(
+            model=model_id,
+            contents=input_prompt,
+            config=GenerateContentConfig(
+                tools=tools,
+            )
+        )
+        return response.text
+    except Exception as e:
+        return f"[ERROR]: Failed to call web_page_question_answering: {e}"
 
 if __name__ == "__main__":
     mcp.run(transport="stdio")

@@ -13,6 +13,7 @@ from mcp import (
 import urllib.parse
 from markitdown import MarkItDown
 import io
+from firecrawl import AsyncFirecrawlApp
 
 
 def request_to_json(content: str) -> dict:
@@ -30,11 +31,13 @@ async def smart_request(url: str, params: dict = None, env: dict = None) -> str:
     if env:
         JINA_API_KEY = env.get("JINA_API_KEY", "")
         SERPER_API_KEY = env.get("SERPER_API_KEY", "")
+        FIRECRAWL_API_KEY = env.get("FIRECRAWL_API_KEY", "")
     else:
         JINA_API_KEY = ""
         SERPER_API_KEY = ""
+        FIRECRAWL_API_KEY = ""
 
-    if JINA_API_KEY == "" and SERPER_API_KEY == "":
+    if JINA_API_KEY == "" and SERPER_API_KEY == "" and FIRECRAWL_API_KEY == "":
         return "[ERROR]: JINA_API_KEY and SERPER_API_KEY are not set, smart_request is not available."
 
     # Auto-add https:// if no protocol is specified
@@ -65,6 +68,25 @@ async def smart_request(url: str, params: dict = None, env: dict = None) -> str:
             ):
                 youtube_hint = "[NOTE]: If you need to get information about its visual or audio content, please use tool 'visual_audio_youtube_analyzing' instead. This tool may not be able to provide visual and audio content of a YouTube Video.\n\n"
 
+            if "archive.org/wayback/available" in url or "en.wikipedia.org/w/api.php" in url:
+                content, jina_err = await scrape_jina(url, JINA_API_KEY)
+                if jina_err:
+                    error_msg += (
+                        f"[ERROR]: Failed to get content from Jina.ai: {jina_err}\n"
+                    )
+                elif content is None or content.strip() == "":
+                    error_msg += "[ERROR]: No content got from Jina.ai.\n"
+                else:
+                    return protocol_hint + youtube_hint + content
+            else:
+                content, firecrawl_err = await scrape_firecrawl(url, FIRECRAWL_API_KEY)
+                if firecrawl_err:
+                    error_msg += f"[ERROR]: Failed to get content from Firecrawl: {firecrawl_err}\n"
+                elif content is None or content.strip() == "":
+                    error_msg += f"[ERROR]: No content got from Firecrawl.\n"
+                else:
+                    return protocol_hint + youtube_hint + content
+            
             content, jina_err = await scrape_jina(url, JINA_API_KEY)
             if jina_err:
                 error_msg += f"Failed to get content from Jina.ai: {jina_err}\n"
@@ -199,3 +221,25 @@ def scrape_request(url: str) -> tuple[str, str]:
 
     except Exception as e:
         return None, f"{str(e)}"
+
+async def scrape_firecrawl(url: str, firecrawl_api_key: str, only_main_content: bool = True) -> tuple[str, str]:
+    """This function uses Firecrawl for scraping a website.
+    Args:
+        url: The URL of the website to scrape.
+    """
+    if firecrawl_api_key == "":
+        return None, "[ERROR]: FIRECRAWL_API_KEY is not set, scrape_website tool is not available."
+
+    app = AsyncFirecrawlApp(api_key=firecrawl_api_key)
+    try:
+        response = await app.scrape(
+            url=url,		
+            formats= ['markdown'],
+            only_main_content=only_main_content,
+            proxy= "auto",
+            parse_pdf= True,
+            max_age= 172800000
+        )
+        return response.markdown, None
+    except Exception as e:
+        return None, f"[ERROR]: Failed to get content from Firecrawl: {str(e)}\n"

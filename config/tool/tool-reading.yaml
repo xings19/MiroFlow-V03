@@ -6,3 +6,4 @@ args:
 env:
   SERPER_API_KEY: "${oc.env:SERPER_API_KEY}"
   JINA_API_KEY: "${oc.env:JINA_API_KEY}"
+  FIRECRAWL_API_KEY: "${oc.env:FIRECRAWL_API_KEY}"
